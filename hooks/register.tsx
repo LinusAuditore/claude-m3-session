@@ -8,6 +8,7 @@ import {
   CARD_BOTTOM,
   PAD_X,
   RING_H,
+  RING_COMPACT_W,
   RING_W,
   ROW_H,
   SUMMARY_H,
@@ -57,6 +58,8 @@ const BADGE_GAP = 12
 const chipWidth = (label: string): number => Math.round(label.length * 7.4) + 30
 const CHIP_GAP = 8
 const MORE_ROOM = 64
+// The narrowest the middle column may be before the rings draw compact.
+const MIN_MIDDLE = 460
 const MAX_STEPS = 24
 const MAX_FILE_CHIPS = 4
 
@@ -312,8 +315,9 @@ const tokensOf = (u: { input_tokens: number; output_tokens: number; cache_read_i
   u === undefined
     ? undefined
     : {
-        in: u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
-        out: u.output_tokens,
+        // Guarded: a usage without its cache fields must not sum to NaN.
+        in: (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
+        out: u.output_tokens ?? 0,
       }
 
 // "Last turn" is everything since the person's last prompt: a turn that began
@@ -432,8 +436,38 @@ const fileLabel = (f: FileStat): string =>
       ? `${f.name} +${f.added} −${f.removed ?? 0}`
       : f.name
 
-const gitLabel = (g: GitState): string =>
-  `⎇ ${g.branch} · ${g.changed === 0 ? 'clean' : `${g.changed} changed`}`
+// Claude's worktrees all live under claude/; the rest of the name says which.
+const shownBranch = (branch: string): string => branch.replace(/^claude\//, '')
+
+// The middle of a long name gives way first: its start and its end (a
+// worktree's hash) are what tell branches apart.
+const squeeze = (text: string, chars: number): string => {
+  if (text.length <= chars) {
+    return text
+  }
+
+  const keep = Math.max(2, chars - 1)
+  const tail = Math.floor(keep / 2)
+
+  return `${text.slice(0, keep - tail)}…${text.slice(text.length - tail)}`
+}
+
+// The git chip in at most `chars` characters: the branch is squeezed, and
+// only when it would drop under ten characters is the change count left out.
+const gitLabel = (g: GitState, chars = Number.POSITIVE_INFINITY): string => {
+  const name = shownBranch(g.branch)
+  const status = ` · ${g.changed === 0 ? 'clean' : `${g.changed} changed`}`
+  const room = chars - 2 - status.length
+
+  if (name.length <= room || room >= 10) {
+    return `⎇ ${squeeze(name, room)}${status}`
+  }
+
+  return `⎇ ${squeeze(name, Math.max(6, chars - 2))}`
+}
+
+// The characters a chip `px` wide holds, the inverse of chipWidth.
+const charsIn = (px: number): number => Math.floor((px - 30) / 7.4)
 
 // ---------------------------------------------------------------- hooks
 
@@ -583,7 +617,12 @@ export const register: Register = on => {
     // The chips on one line: Context, git, then as many files as fit `room`
     // (px; unlimited on the terminal, which wraps), the rest as "+n more".
     const chipsFor = (room: number) => {
-      let used = chipWidth(contextLabel) + (g === null ? 0 : CHIP_GAP + chipWidth(gitLabel(g)))
+      // The git chip gets what Context and a "+n more" leave it.
+      const gitText =
+        g === null
+          ? ''
+          : gitLabel(g, charsIn(room - chipWidth(contextLabel) - CHIP_GAP - (files.length > 0 ? MORE_ROOM : 0)))
+      let used = chipWidth(contextLabel) + (g === null ? 0 : CHIP_GAP + chipWidth(gitText))
       const fitted: FileStat[] = []
 
       for (const f of files.slice(0, MAX_FILE_CHIPS)) {
@@ -611,7 +650,7 @@ export const register: Register = on => {
             variant={isOpen ? 'primary' : undefined}
             onPress={() => toggleContext($)}
           />
-          {g === null ? null : <Button key="git" label={gitLabel(g)} onPress={() => copyBranch($, g.branch)} />}
+          {g === null ? null : <Button key="git" label={gitText} onPress={() => copyBranch($, g.branch)} />}
           {fitted.map(f => (
             <Button key={`file:${f.path}`} label={fileLabel(f)} onPress={() => copyPath($, f.path)} />
           ))}
@@ -700,13 +739,16 @@ export const register: Register = on => {
     const W = Math.round(e.props.bodyColumns * ADVANCE)
     const badgeW = PAD_X + BADGE + BADGE_GAP
     const ringCount = shownLimits.length + (isFiveHourUnlimited ? 1 : 0)
-    const ringsW = ringCount * RING_W + PAD_X
+    // Rings draw compact when full ones would leave the middle too narrow.
+    const isCompact = W - badgeW - (ringCount * RING_W + PAD_X) < MIN_MIDDLE
+    const ringW = isCompact ? RING_COMPACT_W : RING_W
+    const ringsW = ringCount * ringW + PAD_X
     const middle = Math.max(240, W - badgeW - ringsW)
     // The row grows by a line when there are suggestions to offer.
     const rowH = ROW_H + (offered.length > 0 ? SUGGEST_ROW_H : 0)
     const ringY = (rowH - RING_H) / 2
     // The last ring's frame holds the card's right padding.
-    const ringFrameW = (index: number): number => RING_W + (index === ringCount - 1 ? PAD_X : 0)
+    const ringFrameW = (index: number): number => ringW + (index === ringCount - 1 ? PAD_X : 0)
     const badgeAlt =
       u?.percent === undefined
         ? 'Context: waiting for first reply'
@@ -742,10 +784,10 @@ export const register: Register = on => {
     )
 
     const rings = [
-      ...(isFiveHourUnlimited ? [{ key: 'limit:five_hour', svg: unlimitedRingScene('five_hour'), alt: '5h limit: none on this plan' }] : []),
+      ...(isFiveHourUnlimited ? [{ key: 'limit:five_hour', svg: unlimitedRingScene('five_hour', isCompact), alt: '5h limit: none on this plan' }] : []),
       ...shownLimits.map(l => ({
         key: `limit:${l.kind}`,
-        svg: ringScene(l, now),
+        svg: ringScene(l, now, isCompact),
         alt: `${limitName(l.kind)} limit ${Math.round(l.percentUsed)}% used${formatReset(l.resetsAt, now) === undefined ? '' : `, ${formatReset(l.resetsAt, now)}`}`,
       })),
     ]

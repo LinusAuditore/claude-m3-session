@@ -297,20 +297,28 @@ ${dots}
 
 // Taller than its text: the room under the line keeps it off the chips.
 export const SUMMARY_H = 32
+// Rough widths of a character of the summary's two text styles, in px, set
+// a little wide so an estimate never runs past the column.
+const HEAD_ADVANCE = 8.2
+const META_ADVANCE = 6.4
 
 export const summaryScene = (last: TurnSummary | null, tone: Tone, w: number): string => {
   const head =
     last === null ? 'Ready' : last.isAborted ? `Stopped after ${formatDuration(last.durationMs)}` : `Last turn ${formatDuration(last.durationMs)}`
-  const parts =
+  const tools = last === null ? '' : last.tools === 0 ? 'no tools' : last.tools === 1 ? '1 tool' : `${last.tools} tools`
+  const files =
+    last === null ? '' : last.files.length === 0 ? 'no files changed' : last.files.length === 1 ? '1 file' : `${last.files.length} files`
+  const tokens =
+    last?.tokensIn === undefined ? '' : `${formatTokens(last.tokensIn)} in · ${formatTokens(last.tokensOut ?? 0)} out`
+  // The longest line that fits: the file count goes first (the chips show
+  // the files), then the tokens, then the tools.
+  const candidates =
     last === null
-      ? ['No turns yet in this session']
-      : [
-          last.tools === 0 ? 'no tools' : last.tools === 1 ? '1 tool' : `${last.tools} tools`,
-          last.files.length === 0 ? 'no files changed' : last.files.length === 1 ? '1 file' : `${last.files.length} files`,
-          ...(last.tokensIn === undefined
-            ? []
-            : [`${formatTokens(last.tokensIn)} in · ${formatTokens(last.tokensOut ?? 0)} out`]),
-        ]
+      ? [['No turns yet in this session'], []]
+      : [[tools, files, tokens], [tools, tokens], [tools, files], [tools], []].map(c => c.filter(Boolean))
+  const fits = (meta: string[]): boolean =>
+    18 + head.length * HEAD_ADVANCE + (meta.length === 0 ? 0 : 10 + meta.join(' · ').length * META_ADVANCE) <= w
+  const parts = candidates.find(fits) ?? []
 
   return `${svgOpen(w, SUMMARY_H)}
 <style>
@@ -321,7 +329,7 @@ ${BASE_STYLE}
 </style>
 <g class="tone-${tone}">
 <circle cx="6" cy="13" r="4" class="mark"/>
-<text x="18" y="18"><tspan class="head">${esc(head)}</tspan><tspan class="meta" dx="10">${esc(parts.join(' · '))}</tspan></text>
+<text x="18" y="18"><tspan class="head">${esc(head)}</tspan>${parts.length === 0 ? '' : `<tspan class="meta" dx="10">${esc(parts.join(' · '))}</tspan>`}</text>
 </g>
 </svg>`
 }
@@ -330,9 +338,44 @@ ${BASE_STYLE}
 
 export const RING_W = 140
 export const RING_H = 64
+// A narrow band draws each ring alone: the value inside it, its window
+// beneath, and the reset left to the alt text.
+export const RING_COMPACT_W = 52
 
-export const ringScene = (limit: Limit, now: number): string => {
+const compactRing = (kind: string, inner: string, arc: string, tone: Tone): string => `${svgOpen(RING_COMPACT_W, RING_H)}
+<style>
+${BASE_STYLE}
+.ring { fill: none; stroke: var(--track); stroke-width: 5; }
+.arc { fill: none; stroke: var(--accent); stroke-width: 5; stroke-linecap: round; }
+.cv { fill: var(--on); font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.inf { fill: var(--accent); font-size: 15px; font-weight: 600; }
+.rk { fill: var(--on-variant); font-size: 11px; font-weight: 500; }
+</style>
+<g class="tone-${tone}">
+<circle class="ring" cx="26" cy="24" r="16"/>${arc}
+${inner}
+<text x="26" y="58" text-anchor="middle" class="rk">${esc(limitName(kind))}</text>
+</g>
+</svg>`
+
+export const ringScene = (limit: Limit, now: number, isCompact = false): string => {
   const p = Math.min(1, Math.max(0, limit.percentUsed / 100))
+
+  if (isCompact) {
+    const c = 2 * Math.PI * 16
+    const arc =
+      p > 0.005
+        ? `<circle class="arc" cx="26" cy="24" r="16" stroke-dasharray="${(c * p).toFixed(2)} ${c.toFixed(2)}" transform="rotate(-90 26 24)"/>`
+        : ''
+
+    return compactRing(
+      limit.kind,
+      `<text x="26" y="28" text-anchor="middle" class="cv">${Math.round(limit.percentUsed)}</text>`,
+      arc,
+      toneOf(limit.percentUsed),
+    )
+  }
+
   const r = 14
   const c = 2 * Math.PI * r
   const cx = 22
@@ -361,7 +404,11 @@ ${reset === undefined ? '' : `<text x="46" y="47" class="rr">${esc(reset)}</text
 }
 
 // A window the account has no limit on (5h on Ultra): an empty ring holding ∞.
-export const unlimitedRingScene = (kind: string): string => {
+export const unlimitedRingScene = (kind: string, isCompact = false): string => {
+  if (isCompact) {
+    return compactRing(kind, `<text x="26" y="29" text-anchor="middle" class="inf">∞</text>`, '', 'primary')
+  }
+
   const cx = 22
   const cy = 32
 

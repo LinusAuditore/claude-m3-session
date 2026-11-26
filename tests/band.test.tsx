@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 
 const ROOT = '/repo'
 
-const band = (isWorking: boolean, surface: 'desktop' | 'terminal' = 'desktop') =>
+const band = (isWorking: boolean, surface: 'desktop' | 'terminal' = 'desktop', bodyColumns = 110) =>
   ({
     plugin: 'm3-session',
     component: 'AbovePrompt',
@@ -13,7 +13,7 @@ const band = (isWorking: boolean, surface: 'desktop' | 'terminal' = 'desktop') =
       isCollapsed: false,
       isWorking,
       maxRows: 10,
-      bodyColumns: 110,
+      bodyColumns,
       scroll: { offset: 0, bodyRows: 9 },
       view: {},
     },
@@ -383,5 +383,50 @@ test('a model reply that is not the JSON asked for leaves the rule chips', async
   const ui = await $.ui.mount(band(false))
   const chips = (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('suggest:'))
   expect(chips.map(c => c.props.label)).toEqual(['Run the tests', 'Review the changes', 'Commit these changes'])
+  await ui.unmount()
+})
+
+test('in a narrow band, a long worktree branch and the rings give way so all of it fits', async ($, on) => {
+  on('clock.now', () => ({ value: Date.parse('2026-11-26T00:00:00Z') }))
+  on('process.run', (_, e) => {
+    const args = e.argv.filter(a => a !== '-c' && a !== 'core.quotepath=off').slice(1).join(' ')
+
+    return args === 'rev-parse --abbrev-ref HEAD' ? ok('claude/elastic-ramanujan-4deedf\n') : fakeGit(e.argv)
+  })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', () => ({ text: '', reason: 'answer' }))
+  on('session.measure', () => ({ changed: ['context', 'rateLimits'] }))
+
+  await $.session.measure({
+    context: { tokens: 270_000, window: 1_000_000, percent: 27 },
+    rateLimits: [{ kind: 'seven_day', percentUsed: 45, resetsAt: '2026-11-28T04:00:00Z' }],
+    changed: ['context', 'rateLimits'],
+  })
+  await $.prompt.submit({ text: 'edit' } as never)
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/hooks/register.tsx` } as never)
+  await $.tool.call({ tool: 'Write', file_path: `${ROOT}/notes.md` } as never)
+  await $.turn.complete({
+    answer: '',
+    durationMs: 760_000,
+    isAborted: false,
+    turnId: 't1',
+    reason: 'answer',
+    usage: { input_tokens: 5_500_000, output_tokens: 74_000, model: 'claude-opus-5-5' },
+  } as never)
+
+  // About 750 px, the app's chat column in a half-width window.
+  const ui = await $.ui.mount(band(false, 'desktop', 89))
+  const label = String((await ui.find({ type: 'Button', key: 'git' }))?.props.label)
+  expect(label.startsWith('⎇ elastic')).toBe(true)
+  expect(label.includes('claude/')).toBe(false)
+  expect(label.length).toBeLessThanOrEqual(40)
+  // The rings draw compact, the value inside, the window beneath.
+  const seven = await svgByAlt(ui, /^7d limit/)
+  expect(seven?.props.width).toBeLessThanOrEqual(52 + 16)
+  expect(String(seven?.props.source)).toContain('>45</text>')
+  expect((await svgByAlt(ui, /^5h limit/))?.props.width).toBe(52)
+  // The whole summary line still fits the column it is drawn in.
+  expect(String((await svgByAlt(ui, /^Last turn/))?.props.source)).toContain('5.5M in · 74k out')
   await ui.unmount()
 })
