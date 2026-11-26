@@ -1,0 +1,11 @@
+{
+  "name": "m3-session",
+  "version": "0.1.0",
+  "description": "A Material 3 Expressive session band above the prompt: what Claude is doing right now, what the last turn changed, git state, context breakdown and rate-limit rings.",
+  "author": {
+    "name": "LinusAuditore"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/LinusAuditore/claude-m3-session",
+  "types": "./types/index.d.ts"
+}

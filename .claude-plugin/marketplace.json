@@ -1,0 +1,6 @@
+{
+  "name": "claude-m3-session",
+  "description": "A Material 3 Expressive session band for Claude Code.",
+  "owner": { "name": "LinusAuditore" },
+  "plugins": [{ "name": "m3-session", "source": "./" }]
+}
