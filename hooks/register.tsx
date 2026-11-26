@@ -5,12 +5,17 @@ import type { Activity, Breakdown, FileStat, GitState, Limit, StepKind, TurnSumm
 import {
   ACTIVITY_H,
   BADGE,
+  CARD_BOTTOM,
+  PAD_X,
   RING_H,
   RING_W,
+  ROW_H,
   SUMMARY_H,
   activityScene,
   badgeScene,
   breakdownScene,
+  cardScene,
+  inset,
   formatTokens,
   formatDuration,
   formatReset,
@@ -36,7 +41,13 @@ const OLD_PANE = 'm3-session-context'
 // On desktop `bodyColumns` is the slot's width over the code font's advance:
 // this is that advance, so columns times it is the slot in pixels.
 const ADVANCE = 8.4
-const GAP_PX = 12
+// The space between the badge and what follows it, in px.
+const BADGE_GAP = 12
+// A chip's width, estimated from its label: the app draws the Buttons, so
+// their size is not known; the estimate keeps the chips on one line.
+const chipWidth = (label: string): number => Math.round(label.length * 7.4) + 30
+const CHIP_GAP = 8
+const MORE_ROOM = 64
 const MAX_STEPS = 24
 const MAX_FILE_CHIPS = 4
 
@@ -131,16 +142,17 @@ async function nowMs($: EngineInterface): Promise<number> {
   return $.clock.now()
 }
 
-async function startTurn($: EngineInterface): Promise<void> {
+async function startTurn($: EngineInterface, isPrompted: boolean): Promise<void> {
   const startedAt = await nowMs($)
   running.clear()
   turnFiles.clear()
-  await update($, activity, () => ({ startedAt, steps: [], count: 0 }))
+  await update($, activity, () => ({ startedAt, steps: [], count: 0, isPrompted }))
 }
 
+// A tool call with no turn under way: the turn began without a prompt.
 async function ensureTurn($: EngineInterface): Promise<void> {
   if ((await read($, activity)) === null) {
-    await startTurn($)
+    await startTurn($, false)
   }
 }
 
@@ -277,10 +289,26 @@ async function copyBranch($: EngineInterface, branch: string): Promise<void> {
   }
 }
 
+// "Last turn" is everything since the person's last prompt: a turn that began
+// some other way (a background task's notice, a wake-up) adds its time, tools
+// and files to the summary instead of replacing it.
 async function finishTurn($: EngineInterface, durationMs: number, isAborted: boolean): Promise<void> {
   const a = await read($, activity)
-  const files = await statFiles($, [...turnFiles])
-  const summary: TurnSummary = { durationMs, tools: a?.count ?? 0, files, isAborted }
+  const previous = await read($, last)
+  // The summary this turn continues, or none when it began with a prompt.
+  const base = a?.isPrompted === true ? null : previous
+  const paths = new Set(base === null ? [] : base.files.map(f => f.path))
+
+  for (const file of turnFiles) {
+    paths.add(file)
+  }
+
+  const files = await statFiles($, [...paths])
+  const tools = a?.count ?? 0
+  const summary: TurnSummary =
+    base === null
+      ? { durationMs, tools, files, isAborted }
+      : { durationMs: base.durationMs + durationMs, tools: base.tools + tools, files, isAborted }
   await update($, last, () => summary)
   await update($, activity, () => null)
   running.clear()
@@ -318,13 +346,14 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     const result = await next(e)
-    await startTurn($).catch(() => undefined)
+    await startTurn($, true).catch(() => undefined)
 
     return result
   })
 
   on('tool.call', async ($, e, next) => {
-    // Subagents' calls are theirs: the band follows the main thread.
+    // Subagents' calls are theirs (the main loop carries no agentId, as the
+    // desktop app confirmed): the band follows the main thread.
     if (e.agentId !== undefined) {
       return next(e)
     }
@@ -373,6 +402,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
 
+    // A subagent's own turn ending is not the main thread's.
     if (e.agentId !== undefined) {
       return result
     }
@@ -417,21 +447,47 @@ export const register: Register = on => {
     const ui = $.ui.resolve(e)
     const { Box, Button, Text } = ui
 
-    const chips = (
-      <Box flexDirection="row" flexWrap="wrap" gap={1} alignItems="center">
-        <Button
-          key="context"
-          label={isOpen ? 'Hide context' : 'Context'}
-          variant={isOpen ? 'primary' : undefined}
-          onPress={() => toggleContext($)}
-        />
-        {g === null ? null : <Button key="git" label={gitLabel(g)} onPress={() => copyBranch($, g.branch)} />}
-        {files.slice(0, MAX_FILE_CHIPS).map(f => (
-          <Button key={`file:${f.path}`} label={fileLabel(f)} onPress={() => copyPath($, f.path)} />
-        ))}
-        {files.length > MAX_FILE_CHIPS ? <Text dimColor>+{files.length - MAX_FILE_CHIPS} more</Text> : null}
-      </Box>
-    )
+    const contextLabel = isOpen ? 'Hide context' : 'Context'
+
+    // The chips on one line: Context, git, then as many files as fit `room`
+    // (px; unlimited on the terminal, which wraps), the rest as "+n more".
+    const chipsFor = (room: number) => {
+      let used = chipWidth(contextLabel) + (g === null ? 0 : CHIP_GAP + chipWidth(gitLabel(g)))
+      const fitted: FileStat[] = []
+
+      for (const f of files.slice(0, MAX_FILE_CHIPS)) {
+        const w = CHIP_GAP + chipWidth(fileLabel(f))
+        const isLast = fitted.length + 1 === files.length
+
+        if (used + w + (isLast ? 0 : MORE_ROOM) > room) {
+          break
+        }
+
+        fitted.push(f)
+        used += w
+      }
+
+      const more = files.length - fitted.length
+
+      return (
+        // No overflow clipping: it cut off the app's button corners and the
+        // outline ring that gives a light-mode chip its contrast. The chips
+        // are fitted to the width above instead.
+        <Box flexDirection="row" flexWrap="nowrap" gap={1} alignItems="center">
+          <Button
+            key="context"
+            label={contextLabel}
+            variant={isOpen ? 'primary' : undefined}
+            onPress={() => toggleContext($)}
+          />
+          {g === null ? null : <Button key="git" label={gitLabel(g)} onPress={() => copyBranch($, g.branch)} />}
+          {fitted.map(f => (
+            <Button key={`file:${f.path}`} label={fileLabel(f)} onPress={() => copyPath($, f.path)} />
+          ))}
+          {more > 0 ? <Text dimColor>+{more} more</Text> : null}
+        </Box>
+      )
+    }
 
     if (e.surface === 'terminal') {
       const percent = u?.percent === undefined ? '–' : `${Math.round(u.percent)}%`
@@ -444,7 +500,7 @@ export const register: Register = on => {
           : `${summary.isAborted ? 'Stopped after' : 'Last turn'} ${formatDuration(summary.durationMs)} · ${summary.tools} tools · ${summary.files.length} files`
 
       return (
-        <Box flexDirection="column">
+        <Box key="card" flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
           <Box flexDirection="row" gap={1}>
             <Text bold>{percent}</Text>
             <Text>{line}</Text>
@@ -459,7 +515,7 @@ export const register: Register = on => {
               </Text>
             ))}
           </Box>
-          {isWorking ? null : chips}
+          {isWorking ? null : chipsFor(Number.POSITIVE_INFINITY)}
           {isWorking || b === null
             ? null
             : b.slices
@@ -474,87 +530,101 @@ export const register: Register = on => {
     }
 
     const { Svg } = $.ui.resolve(e)
-    const slot = Math.round(e.props.bodyColumns * ADVANCE)
-    const ringsW = (shownLimits.length + (isFiveHourUnlimited ? 1 : 0)) * (RING_W + GAP_PX)
-    const middle = Math.max(240, slot - BADGE - GAP_PX - ringsW - 8)
+    // The band's whole width; the card is drawn to it, and everything inside
+    // carries its own spacing in px, so the card's height is known.
+    const W = Math.round(e.props.bodyColumns * ADVANCE)
+    const badgeW = PAD_X + BADGE + BADGE_GAP
+    const ringCount = shownLimits.length + (isFiveHourUnlimited ? 1 : 0)
+    const ringsW = ringCount * RING_W + PAD_X
+    const middle = Math.max(240, W - badgeW - ringsW)
+    const ringY = (ROW_H - RING_H) / 2
+    // The last ring's frame holds the card's right padding.
+    const ringFrameW = (index: number): number => RING_W + (index === ringCount - 1 ? PAD_X : 0)
     const badgeAlt =
       u?.percent === undefined
         ? 'Context: waiting for first reply'
         : `Context ${Math.round(u.percent)}% used${u.tokens === undefined ? '' : ` (${formatTokens(u.tokens)} of ${formatTokens(u.window)})`}`
 
-    const body =
-      isWorking ? (
+    const body = isWorking ? (
+      <Svg
+        source={activityScene(
+          a ?? { startedAt: now, steps: [], count: 0 },
+          Math.max(0, Math.floor((now - (a?.startedAt ?? now)) / 1000)),
+          tone,
+          middle,
+        )}
+        alt={`${a?.current?.label ?? 'Thinking'}, ${a?.count ?? 0} steps so far`}
+        width={middle}
+        height={ACTIVITY_H}
+      />
+    ) : (
+      <Box flexDirection="column" gap={0}>
         <Svg
-          source={activityScene(
-            a ?? { startedAt: now, steps: [], count: 0 },
-            Math.max(0, Math.floor((now - (a?.startedAt ?? now)) / 1000)),
-            tone,
-            middle,
-          )}
-          alt={`${a?.current?.label ?? 'Thinking'}, ${a?.count ?? 0} steps so far`}
+          source={summaryScene(summary, tone, middle)}
+          alt={
+            summary === null
+              ? 'No turns yet in this session'
+              : `${summary.isAborted ? 'Stopped after' : 'Last turn'} ${formatDuration(summary.durationMs)}, ${summary.tools} tools, ${summary.files.length} files changed`
+          }
           width={middle}
-          height={ACTIVITY_H}
+          height={SUMMARY_H}
         />
-      ) : (
-        <Box flexDirection="column" gap={0}>
-          <Svg
-            source={summaryScene(summary, tone, middle)}
-            alt={
-              summary === null
-                ? 'No turns yet in this session'
-                : `${summary.isAborted ? 'Stopped after' : 'Last turn'} ${formatDuration(summary.durationMs)}, ${summary.tools} tools, ${summary.files.length} files changed`
-            }
-            width={middle}
-            height={SUMMARY_H}
-          />
-          {chips}
-        </Box>
-      )
-
-    const unfolded = isWorking || b === null ? null : breakdownScene(b, Math.max(240, slot - 8))
-    const row = (
-      <Box flexDirection="row" alignItems="center" gap={1}>
-        <Svg source={badgeScene(u?.percent, isWorking)} alt={badgeAlt} width={BADGE} height={BADGE} />
-        <Box flexDirection="column" flexGrow={1}>
-          {body}
-        </Box>
-        {isFiveHourUnlimited ? (
-          <Svg
-            key="limit:five_hour"
-            source={unlimitedRingScene('five_hour')}
-            alt="5h limit: none on this plan"
-            width={RING_W}
-            height={RING_H}
-          />
-        ) : null}
-        {shownLimits.map(l => (
-          <Svg
-            key={`limit:${l.kind}`}
-            source={ringScene(l, now)}
-            alt={`${limitName(l.kind)} limit ${Math.round(l.percentUsed)}% used${formatReset(l.resetsAt, now) === undefined ? '' : `, ${formatReset(l.resetsAt, now)}`}`}
-            width={RING_W}
-            height={RING_H}
-          />
-        ))}
+        {chipsFor(middle)}
       </Box>
     )
 
-    if (unfolded === null || b === null) {
-      return row
-    }
+    const rings = [
+      ...(isFiveHourUnlimited ? [{ key: 'limit:five_hour', svg: unlimitedRingScene('five_hour'), alt: '5h limit: none on this plan' }] : []),
+      ...shownLimits.map(l => ({
+        key: `limit:${l.kind}`,
+        svg: ringScene(l, now),
+        alt: `${limitName(l.kind)} limit ${Math.round(l.percentUsed)}% used${formatReset(l.resetsAt, now) === undefined ? '' : `, ${formatReset(l.resetsAt, now)}`}`,
+      })),
+    ]
 
+    const unfolded = isWorking || b === null ? null : breakdownScene(b, W - PAD_X * 2)
+    const unfoldedH = unfolded === null ? 0 : unfolded.height + CARD_BOTTOM
+    const cardH = ROW_H + unfoldedH
+
+    // The card is in the flow and sets the band's size; the content lies on
+    // an absolute layer over it, which paints above it (an absolute card
+    // behind positioned content was drawn over it in the app).
     return (
-      <Box flexDirection="column" gap={1}>
-        {row}
-        <Svg
-          source={unfolded.svg}
-          alt={`Context window by category: ${b.slices
-            .filter(slice => slice.tokens > 0)
-            .map(slice => `${slice.name} ${formatTokens(slice.tokens)}`)
-            .join(', ')}`}
-          width={Math.max(240, slot - 8)}
-          height={unfolded.height}
-        />
+      <Box key="card" position="relative" flexDirection="column">
+        <Svg source={cardScene(W, cardH)} alt="Session band" width={W} height={cardH} />
+        <Box position="absolute" top={0} left={0} width="100%" flexDirection="column">
+          <Box flexDirection="row" alignItems="center" gap={0}>
+            <Svg
+              source={inset(badgeScene(u?.percent, isWorking), badgeW, ROW_H, PAD_X, (ROW_H - BADGE) / 2)}
+              alt={badgeAlt}
+              width={badgeW}
+              height={ROW_H}
+            />
+            <Box flexDirection="column" flexGrow={1}>
+              {body}
+            </Box>
+            {rings.map((ring, index) => (
+              <Svg
+                key={ring.key}
+                source={inset(ring.svg, ringFrameW(index), ROW_H, 0, ringY)}
+                alt={ring.alt}
+                width={ringFrameW(index)}
+                height={ROW_H}
+              />
+            ))}
+          </Box>
+          {unfolded === null || b === null ? null : (
+            <Svg
+              source={inset(unfolded.svg, W, unfoldedH, PAD_X, 0)}
+              alt={`Context window by category: ${b.slices
+                .filter(slice => slice.tokens > 0)
+                .map(slice => `${slice.name} ${formatTokens(slice.tokens)}`)
+                .join(', ')}`}
+              width={W}
+              height={unfoldedH}
+            />
+          )}
+        </Box>
       </Box>
     )
   })

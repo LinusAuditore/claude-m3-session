@@ -108,6 +108,64 @@ test('after a turn, the band sums it up with file and git chips', async ($, on) 
   await ui.unmount()
 })
 
+test('a turn that began without a prompt adds to the last summary', async ($, on) => {
+  on('clock.now', () => ({ value: 0 }))
+  on('process.run', (_, e) => fakeGit(e.argv))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', () => ({ text: '', reason: 'answer' }))
+  const done = (durationMs: number, turnId: string) =>
+    $.turn.complete({ answer: '', durationMs, isAborted: false, turnId, reason: 'answer' } as never)
+
+  await $.prompt.submit({ text: 'edit and check' } as never)
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/hooks/register.tsx` } as never)
+  await $.tool.call({ tool: 'Bash', command: 'npm test' } as never)
+  await done(90_000, 't1')
+
+  // A background task's notice wakes Claude: no prompt, one more call.
+  await $.tool.call({ tool: 'Write', file_path: `${ROOT}/notes.md` } as never)
+  await done(31_000, 't2')
+
+  const ui = await $.ui.mount(band(false))
+  expect(await alts(ui)).toContain('Last turn 2m 1s, 3 tools, 2 files changed')
+  await ui.unmount()
+})
+
+test('a subagent\'s calls and turn are not the main thread\'s', async ($, on) => {
+  on('clock.now', () => ({ value: 0 }))
+  on('process.run', (_, e) => fakeGit(e.argv))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', () => ({ text: '', reason: 'answer' }))
+
+  await $.prompt.submit({ text: 'delegate a search' } as never)
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/a.ts` } as never)
+  await $.tool.call({ tool: 'Agent', description: 'Search the repo' } as never)
+  await $.tool.call({ tool: 'Grep', pattern: 'x', agentId: 'sub-1' } as never)
+  await $.tool.call({ tool: 'Grep', pattern: 'y', agentId: 'sub-1' } as never)
+  await $.turn.complete({ answer: '', durationMs: 20_000, isAborted: false, turnId: 's1', reason: 'answer', agentId: 'sub-1' } as never)
+  await $.turn.complete({ answer: '', durationMs: 60_000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+
+  const ui = await $.ui.mount(band(false))
+  expect(await alts(ui)).toContain('Last turn 1m 0s, 2 tools, 0 files changed')
+  await ui.unmount()
+})
+
+test('a turn with no tools says so in words', async ($, on) => {
+  on('clock.now', () => ({ value: 0 }))
+  on('process.run', (_, e) => fakeGit(e.argv))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('turn.complete', () => ({ text: '', reason: 'answer' }))
+
+  await $.prompt.submit({ text: 'just answer' } as never)
+  await $.turn.complete({ answer: '', durationMs: 12_000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+
+  const ui = await $.ui.mount(band(false))
+  const line = await svgByAlt(ui, /^Last turn 12s/)
+  expect(String(line?.props.source)).toContain('no tools · no files changed')
+  await ui.unmount()
+})
+
 test('on a plan with no 5h window (Ultra), the 5h ring shows ∞', async ($, on) => {
   on('clock.now', () => ({ value: Date.parse('2026-11-26T00:00:00Z') }))
   on('session.measure', () => ({ changed: ['context', 'rateLimits'] }))
@@ -119,8 +177,15 @@ test('on a plan with no 5h window (Ultra), the 5h ring shows ∞', async ($, on)
   })
 
   const ui = await $.ui.mount(band(false))
+  // Everything sits in one M3 container: a card drawn behind the content.
+  const card = await ui.find({ type: 'Box', key: 'card' })
+  expect(card?.props.position).toBe('relative')
+  const background = await svgByAlt(ui, /^Session band$/)
+  expect(String(background?.props.source)).toContain('rx="24"')
+  expect(background?.props.height).toBe(80)
   const drawn = await alts(ui)
   expect(drawn).toEqual([
+    'Session band',
     'Context 19% used (190k of 1M)',
     'No turns yet in this session',
     '5h limit: none on this plan',
@@ -163,6 +228,8 @@ test('the Context chip unfolds the breakdown in the band, and folds it again', a
   expect((await ui.find({ type: 'Button', key: 'context' }))?.props.label).toBe('Context')
 
   await ui.press({ key: 'context' })
+  // The card grows to hold the breakdown.
+  expect(((await svgByAlt(ui, /^Session band$/))?.props.height as number) > 80).toBe(true)
   expect((await svgByAlt(ui, unfolded))?.props.alt).toBe(
     'Context window by category: System prompt 12k, Messages 170k',
   )

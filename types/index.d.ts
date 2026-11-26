@@ -31,6 +31,12 @@ export type Activity = {
   steps: StepKind[]
   /** How many tool calls the turn has made. */
   count: number
+  /**
+   * Whether the turn began with the person's prompt. A turn that began some
+   * other way (a background task's notice, say) continues the last summary.
+   * Absent on what an earlier version stored, which counts as not prompted.
+   */
+  isPrompted?: boolean
 }
 
 /** A file the last turn wrote, with its change against HEAD where git knows it. */

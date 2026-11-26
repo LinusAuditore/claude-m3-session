@@ -73,22 +73,28 @@ const esc = (text: string): string =>
 const fit = (text: string, chars: number): string =>
   text.length <= chars ? text : `${text.slice(0, Math.max(1, chars - 1))}…`
 
-// M3 baseline tonal roles: accent, container, on-container; light then dark.
+// M3 baseline roles, chosen to read on the band's tinted surface container.
+// Per tone: accent (arcs, dots, glyphs), the badge's fill, the badge's text.
+// Light badges are filled with the role itself, as a pale container would
+// melt into the tinted card; dark ones keep the container tone. Tracks are
+// outline-variant (a step lighter in dark), and icons sit on the lowest
+// surface. Light, then dark.
 const PALETTE = {
   light: {
-    surface: '#ECE6F0',
     on: '#1D1B20',
     onVariant: '#49454F',
-    track: '#E8DEF8',
-    primary: ['#6750A4', '#EADDFF', '#4F378B'],
-    tertiary: ['#7D5260', '#FFD8E4', '#633B48'],
-    error: ['#B3261E', '#F9DEDC', '#8C1D18'],
+    track: '#CAC4D0',
+    lowest: '#FFFFFF',
+    primary: ['#6750A4', '#6750A4', '#FFFFFF'],
+    tertiary: ['#7D5260', '#7D5260', '#FFFFFF'],
+    error: ['#B3261E', '#B3261E', '#FFFFFF'],
   },
   dark: {
-    surface: '#2B2930',
     on: '#E6E0E9',
     onVariant: '#CAC4D0',
-    track: '#4A4458',
+    // A step above outline-variant: the card's lifted blue-gray needs it.
+    track: '#5B5866',
+    lowest: '#0F0D13',
     primary: ['#D0BCFF', '#4F378B', '#EADDFF'],
     tertiary: ['#EFB8C8', '#633B48', '#FFD8E4'],
     error: ['#F2B8B5', '#8C1D18', '#F9DEDC'],
@@ -106,7 +112,7 @@ const vars = (scheme: 'light' | 'dark'): string => {
   })
 
   return [
-    `--surface:${p.surface}`,
+    `--lowest:${p.lowest}`,
     `--on:${p.on}`,
     `--on-variant:${p.onVariant}`,
     `--track:${p.track}`,
@@ -258,9 +264,9 @@ export const activityScene = (activity: Activity, elapsed: number, tone: Tone, w
   return `${svgOpen(w, ACTIVITY_H)}
 <style>
 ${BASE_STYLE}
-.icon-bg { fill: var(--container); }
-.glyph { fill: none; stroke: var(--on-container); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.glyph .fill { fill: var(--on-container); stroke: none; }
+.icon-bg { fill: var(--lowest); }
+.glyph { fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.glyph .fill { fill: var(--accent); stroke: none; }
 .label { fill: var(--on); font-size: 15px; font-weight: 600; }
 .clock, .ss text, .mm text { fill: var(--on-variant); font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .meta { fill: var(--on-variant); font-size: 11.5px; font-weight: 500; }
@@ -298,7 +304,7 @@ export const summaryScene = (last: TurnSummary | null, tone: Tone, w: number): s
     last === null
       ? ['No turns yet in this session']
       : [
-          last.tools === 1 ? '1 tool' : `${last.tools} tools`,
+          last.tools === 0 ? 'no tools' : last.tools === 1 ? '1 tool' : `${last.tools} tools`,
           last.files.length === 0 ? 'no files changed' : last.files.length === 1 ? '1 file' : `${last.files.length} files`,
         ]
 
@@ -406,7 +412,7 @@ export const breakdownScene = (b: Breakdown, w: number): { svg: string; height: 
   const pills = parts
     .map(part => {
       const width = Math.max(3, (part.tokens / total) * room)
-      const pill = `<rect x="${x.toFixed(1)}" y="${barY}" width="${width.toFixed(1)}" height="14" rx="${Math.min(7, width / 2).toFixed(1)}" fill="${part.color}"${part.isFree ? ' opacity="0.35"' : ''}/>`
+      const pill = `<rect x="${x.toFixed(1)}" y="${barY}" width="${width.toFixed(1)}" height="14" rx="${Math.min(7, width / 2).toFixed(1)}" ${part.isFree ? 'class="free"' : `fill="${part.color}"`}/>`
       x += width + gap
 
       return pill
@@ -427,7 +433,7 @@ export const breakdownScene = (b: Breakdown, w: number): { svg: string; height: 
       const lx = (i % cols) * LEGEND_COL + 6
       const ly = legendY + Math.floor(i / cols) * LEGEND_ROW
 
-      return `<circle cx="${lx}" cy="${ly - 4}" r="4" fill="${part.color}"${part.isFree ? ' opacity="0.5"' : ''}/><text x="${lx + 10}" y="${ly}" class="ln">${esc(fit(part.name, 20))}</text><text x="${lx + LEGEND_COL - 16}" y="${ly}" text-anchor="end" class="lv">${formatTokens(part.tokens)} · ${pct(part.tokens)}</text>`
+      return `<circle cx="${lx}" cy="${ly - 4}" r="4" ${part.isFree ? 'class="free"' : `fill="${part.color}"`}/><text x="${lx + 10}" y="${ly}" class="ln">${esc(fit(part.name, 20))}</text><text x="${lx + LEGEND_COL - 16}" y="${ly}" text-anchor="end" class="lv">${formatTokens(part.tokens)} · ${pct(part.tokens)}</text>`
     })
     .join('')
   const height = legendY + Math.ceil(parts.length / cols) * LEGEND_ROW - 8
@@ -444,6 +450,7 @@ ${BASE_STYLE}
 .hm { fill: var(--on-variant); font-size: 12px; font-weight: 500; }
 .tick { fill: var(--on); opacity: 0.7; }
 .tl { fill: var(--on-variant); font-size: 10px; font-weight: 500; }
+.free { fill: var(--track); }
 .ln { fill: var(--on); font-size: 12px; font-weight: 500; }
 .lv { fill: var(--on-variant); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
 </style>
@@ -454,3 +461,31 @@ ${legend}
 </svg>`,
   }
 }
+
+// ------------------------------------------------------------------ the card
+
+// The band's one M3 container is drawn here rather than by a Box, so it has
+// rounded corners and a color per mode: the band lays it behind its content,
+// which carries its own spacing in pixels so the card's height is known.
+export const ROW_H = 80
+export const PAD_X = 16
+export const CARD_BOTTOM = 12
+
+// A tone of the surface-container family with a little blue: near-white in
+// light mode, a quiet lift over the page in dark mode.
+const CARD_LIGHT = '#EEF3FC'
+const CARD_DARK = '#232731'
+
+export const cardScene = (w: number, h: number): string =>
+  `${svgOpen(w, h)}
+<style>
+.card { fill: ${CARD_LIGHT}; }
+@media (prefers-color-scheme: dark) { .card { fill: ${CARD_DARK}; } }
+</style>
+<rect class="card" x="0" y="0" width="${w}" height="${h}" rx="24"/>
+</svg>`
+
+// Places a scene inside a larger frame at (x, y): the frame's empty part is
+// the spacing around it, drawn in pixels.
+export const inset = (inner: string, w: number, h: number, x: number, y: number): string =>
+  `${svgOpen(w, h)}${inner.replace('<svg xmlns="http://www.w3.org/2000/svg"', `<svg x="${x}" y="${y}"`)}</svg>`

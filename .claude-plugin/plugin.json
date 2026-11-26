@@ -1,6 +1,6 @@
 {
   "name": "m3-session",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A Material 3 Expressive session band above the prompt: what Claude is doing right now, what the last turn changed, git state, context breakdown and rate-limit rings.",
   "author": {
     "name": "LinusAuditore"
