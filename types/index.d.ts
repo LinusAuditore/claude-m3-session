@@ -53,6 +53,11 @@ export type TurnSummary = {
   tools: number
   files: FileStat[]
   isAborted: boolean
+  /** Tokens the model read over the turn's requests, cached or not; absent
+   *  when the turn reported no usage (an interrupt, an API error). */
+  tokensIn?: number
+  /** Tokens the model wrote over the turn's requests. */
+  tokensOut?: number
 }
 
 export type GitState = {
@@ -72,6 +77,16 @@ export type Breakdown = {
   model: string
 }
 
+/** A next step offered as a chip; pressing it fills the input box with `text`. */
+export type Suggestion = {
+  /** The chip's words, in English like the rest of the band. */
+  label: string
+  /** What goes in the input box, in the language of the person's last prompt. */
+  text: string
+  /** `rule` from what the band knows; `ai` written by a small model (opt-in). */
+  source: 'rule' | 'ai'
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'm3-session': {
@@ -83,6 +98,10 @@ declare module 'claude-code' {
       breakdown: Breakdown | null
       /** Whether the band shows the context breakdown under its chips. */
       isContextOpen: boolean
+      /** The next steps offered after the last turn. */
+      suggestions: Suggestion[]
+      /** Whether a small model writes the suggestions (`/ai-suggestions`). */
+      isAiOn: boolean
     }
   }
 }

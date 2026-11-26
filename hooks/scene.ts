@@ -295,7 +295,8 @@ ${dots}
 
 // ------------------------------------------------------ the last-turn line
 
-export const SUMMARY_H = 30
+// Taller than its text: the room under the line keeps it off the chips.
+export const SUMMARY_H = 32
 
 export const summaryScene = (last: TurnSummary | null, tone: Tone, w: number): string => {
   const head =
@@ -306,6 +307,9 @@ export const summaryScene = (last: TurnSummary | null, tone: Tone, w: number): s
       : [
           last.tools === 0 ? 'no tools' : last.tools === 1 ? '1 tool' : `${last.tools} tools`,
           last.files.length === 0 ? 'no files changed' : last.files.length === 1 ? '1 file' : `${last.files.length} files`,
+          ...(last.tokensIn === undefined
+            ? []
+            : [`${formatTokens(last.tokensIn)} in · ${formatTokens(last.tokensOut ?? 0)} out`]),
         ]
 
   return `${svgOpen(w, SUMMARY_H)}
@@ -316,8 +320,8 @@ ${BASE_STYLE}
 .mark { fill: var(--accent); }
 </style>
 <g class="tone-${tone}">
-<circle cx="6" cy="16" r="4" class="mark"/>
-<text x="18" y="21"><tspan class="head">${esc(head)}</tspan><tspan class="meta" dx="10">${esc(parts.join(' · '))}</tspan></text>
+<circle cx="6" cy="13" r="4" class="mark"/>
+<text x="18" y="18"><tspan class="head">${esc(head)}</tspan><tspan class="meta" dx="10">${esc(parts.join(' · '))}</tspan></text>
 </g>
 </svg>`
 }

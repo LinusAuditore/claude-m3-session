@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Activity, Breakdown, FileStat, GitState, Limit, StepKind, TurnSummary, Usage } from '../types'
+import type { Activity, Breakdown, FileStat, GitState, Limit, StepKind, Suggestion, TurnSummary, Usage } from '../types'
 import {
   ACTIVITY_H,
   BADGE,
@@ -25,6 +25,7 @@ import {
   toneOf,
   unlimitedRingScene,
 } from './scene'
+import { AI_SYSTEM, MAX_SUGGESTIONS, aiPrompt, langOf, parseAi, ruleSuggestions } from './suggest'
 
 const usage = atom({ plugin: 'm3-session', key: 'usage' } as const, null)
 const limits = atom({ plugin: 'm3-session', key: 'limits' } as const, [])
@@ -33,6 +34,14 @@ const last = atom({ plugin: 'm3-session', key: 'last' } as const, null)
 const git = atom({ plugin: 'm3-session', key: 'git' } as const, null)
 const breakdown = atom({ plugin: 'm3-session', key: 'breakdown' } as const, null)
 const isContextOpen = atom({ plugin: 'm3-session', key: 'isContextOpen' } as const, false)
+const suggestions = atom({ plugin: 'm3-session', key: 'suggestions' } as const, [])
+const isAiOn = atom({ plugin: 'm3-session', key: 'isAiOn' } as const, false)
+
+// The setting behind `/ai-suggestions`, kept across sessions in `$.store`.
+const AI_STORE_KEY = 'aiSuggestions'
+const AI_COMMAND = 'ai-suggestions'
+// A suggestion row's height on desktop: the card grows by it.
+const SUGGEST_ROW_H = 26
 
 // 0.1.0 showed the breakdown in a pane; it now unfolds in the band, and a
 // pane left open by that version is closed when the mod loads.
@@ -135,6 +144,12 @@ const WRITES = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit'])
 const running = new Map<string, { kind: StepKind; label: string }>()
 const turnFiles = new Set<string>()
 let callSerial = 0
+// The person's last prompt, for the language of the filled text and for the
+// model's view of the exchange (a reload forgets it, which costs only that).
+let lastPrompt = ''
+// Bumped per turn, so a model reply that arrives after a new turn began is
+// dropped rather than shown for the wrong turn.
+let turnSerial = 0
 
 // ----------------------------------------------------------- engine calls
 
@@ -289,10 +304,28 @@ async function copyBranch($: EngineInterface, branch: string): Promise<void> {
   }
 }
 
+type TurnTokens = { in: number; out: number }
+
+// What the model read (uncached, cache-read and cache-written input, summed
+// over the turn's requests) and what it wrote.
+const tokensOf = (u: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number } | undefined): TurnTokens | undefined =>
+  u === undefined
+    ? undefined
+    : {
+        in: u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
+        out: u.output_tokens,
+      }
+
 // "Last turn" is everything since the person's last prompt: a turn that began
 // some other way (a background task's notice, a wake-up) adds its time, tools
 // and files to the summary instead of replacing it.
-async function finishTurn($: EngineInterface, durationMs: number, isAborted: boolean): Promise<void> {
+async function finishTurn(
+  $: EngineInterface,
+  durationMs: number,
+  isAborted: boolean,
+  answer: string,
+  turnUsage: TurnTokens | undefined,
+): Promise<void> {
   const a = await read($, activity)
   const previous = await read($, last)
   // The summary this turn continues, or none when it began with a prompt.
@@ -305,10 +338,19 @@ async function finishTurn($: EngineInterface, durationMs: number, isAborted: boo
 
   const files = await statFiles($, [...paths])
   const tools = a?.count ?? 0
+  const add = (x: number | undefined, y: number | undefined): number | undefined =>
+    x === undefined && y === undefined ? undefined : (x ?? 0) + (y ?? 0)
   const summary: TurnSummary =
     base === null
-      ? { durationMs, tools, files, isAborted }
-      : { durationMs: base.durationMs + durationMs, tools: base.tools + tools, files, isAborted }
+      ? { durationMs, tools, files, isAborted, tokensIn: turnUsage?.in, tokensOut: turnUsage?.out }
+      : {
+          durationMs: base.durationMs + durationMs,
+          tools: base.tools + tools,
+          files,
+          isAborted,
+          tokensIn: add(base.tokensIn, turnUsage?.in),
+          tokensOut: add(base.tokensOut, turnUsage?.out),
+        }
   await update($, last, () => summary)
   await update($, activity, () => null)
   running.clear()
@@ -318,6 +360,67 @@ async function finishTurn($: EngineInterface, durationMs: number, isAborted: boo
   if (await read($, isContextOpen)) {
     await loadBreakdown($).catch(() => undefined)
   }
+
+  await suggest($, summary, answer)
+}
+
+// Rule chips at once; with /ai-suggestions on, a small model's in their place
+// once it answers (the rules stay if it fails or answers nothing usable).
+async function suggest($: EngineInterface, summary: TurnSummary, answer: string): Promise<void> {
+  const g = await read($, git)
+  const u = await read($, usage)
+  const rules = ruleSuggestions(summary, g, u?.percent, langOf(lastPrompt))
+  await update($, suggestions, () => rules)
+
+  if (!(await read($, isAiOn)) || lastPrompt.trim() === '') {
+    return
+  }
+
+  // Not awaited: the turn's end is not held up by the model.
+  void writeSuggestions($, summary, answer, g).catch(() => undefined)
+}
+
+async function writeSuggestions(
+  $: EngineInterface,
+  summary: TurnSummary,
+  answer: string,
+  g: GitState | null,
+): Promise<void> {
+  const serial = turnSerial
+  const reply = await $.model.complete({
+    model: 'haiku',
+    system: AI_SYSTEM,
+    prompt: aiPrompt(lastPrompt, answer, summary, g),
+    maxTokens: 300,
+  })
+
+  if (!reply.isAnswered || serial !== turnSerial) {
+    return
+  }
+
+  const written = parseAi(reply.text)
+
+  if (written.length > 0) {
+    await update($, suggestions, () => written)
+  }
+}
+
+async function fillPrompt($: EngineInterface, text: string): Promise<void> {
+  const filled = await $.prompt.fill({ text, mode: 'replace' })
+
+  if (!filled.isFilled) {
+    $.ui.toast(filled.refusal === 'dialog' ? 'Close the dialog first' : "Couldn't fill the input box")
+  }
+}
+
+async function loadAiSetting($: EngineInterface): Promise<void> {
+  const stored = await $.store.get(AI_STORE_KEY)
+  await update($, isAiOn, () => stored === true)
+}
+
+async function setAi($: EngineInterface, isOn: boolean): Promise<void> {
+  await $.store.set(AI_STORE_KEY, isOn)
+  await update($, isAiOn, () => isOn)
 }
 
 // --------------------------------------------------------------- labels
@@ -340,12 +443,39 @@ export const register: Register = on => {
     await $.ui.close({ id: OLD_PANE }).catch(() => undefined)
     await refreshUsage($).catch(() => undefined)
     await refreshGit($)
+    await loadAiSetting($).catch(() => undefined)
+    await $.command
+      .register({
+        name: AI_COMMAND,
+        description: 'Have a small model write the band\'s suggestion chips after each turn',
+        argumentHint: 'on | off',
+      })
+      .catch(() => undefined)
 
     return result
   })
 
+  on('command.run', { command: AI_COMMAND }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+    const isOn = arg === 'on' ? true : arg === 'off' ? false : !(await read($, isAiOn))
+    await setAi($, isOn)
+
+    return {
+      text: isOn
+        ? 'AI suggestions on: after each turn a small model (Haiku) writes the suggestion chips from your last message and the reply. It adds a little to /cost.'
+        : 'AI suggestions off: the chips come from rules only, with no model calls.',
+    }
+  })
+
   on('prompt.submit', async ($, e, next) => {
     const result = await next(e)
+    turnSerial += 1
+
+    // A slash command is not a prompt to suggest from.
+    if (e.command === undefined && e.text.trim() !== '') {
+      lastPrompt = e.text
+    }
+
     await startTurn($, true).catch(() => undefined)
 
     return result
@@ -407,7 +537,7 @@ export const register: Register = on => {
       return result
     }
 
-    await finishTurn($, e.durationMs, e.isAborted).catch(() => undefined)
+    await finishTurn($, e.durationMs, e.isAborted, e.answer, tokensOf(e.usage)).catch(() => undefined)
 
     return result
   })
@@ -444,6 +574,7 @@ export const register: Register = on => {
     const files = summary?.files ?? []
     const isOpen = await read($, isContextOpen)
     const b = isOpen ? await read($, breakdown) : null
+    const offered = isWorking ? [] : await read($, suggestions)
     const ui = $.ui.resolve(e)
     const { Box, Button, Text } = ui
 
@@ -489,6 +620,39 @@ export const register: Register = on => {
       )
     }
 
+    // The suggestions on one line: as many as fit `room`; pressing one fills
+    // the input box, nothing is sent. Written ones carry a ✦.
+    const suggestionsFor = (room: number) => {
+      let used = 0
+      const fitted: Suggestion[] = []
+
+      for (const s of offered.slice(0, MAX_SUGGESTIONS)) {
+        const w = (fitted.length === 0 ? 0 : CHIP_GAP) + chipWidth(s.label) + (s.source === 'ai' ? 14 : 0)
+
+        if (used + w > room) {
+          break
+        }
+
+        fitted.push(s)
+        used += w
+      }
+
+      // The app's Buttons stand a little taller than the row that holds them,
+      // so a second row of them needs a gap or it runs into the first.
+      return (
+        <Box flexDirection="row" flexWrap="nowrap" gap={1} alignItems="center" marginTop="sm">
+          {fitted.map((s, i) => (
+            <Button
+              key={`suggest:${i}`}
+              label={s.source === 'ai' ? `✦ ${s.label}` : s.label}
+              dimColor
+              onPress={() => fillPrompt($, s.text)}
+            />
+          ))}
+        </Box>
+      )
+    }
+
     if (e.surface === 'terminal') {
       const percent = u?.percent === undefined ? '–' : `${Math.round(u.percent)}%`
       const current = a?.current?.label ?? 'Thinking'
@@ -516,6 +680,7 @@ export const register: Register = on => {
             ))}
           </Box>
           {isWorking ? null : chipsFor(Number.POSITIVE_INFINITY)}
+          {offered.length === 0 ? null : suggestionsFor(Number.POSITIVE_INFINITY)}
           {isWorking || b === null
             ? null
             : b.slices
@@ -537,7 +702,9 @@ export const register: Register = on => {
     const ringCount = shownLimits.length + (isFiveHourUnlimited ? 1 : 0)
     const ringsW = ringCount * RING_W + PAD_X
     const middle = Math.max(240, W - badgeW - ringsW)
-    const ringY = (ROW_H - RING_H) / 2
+    // The row grows by a line when there are suggestions to offer.
+    const rowH = ROW_H + (offered.length > 0 ? SUGGEST_ROW_H : 0)
+    const ringY = (rowH - RING_H) / 2
     // The last ring's frame holds the card's right padding.
     const ringFrameW = (index: number): number => RING_W + (index === ringCount - 1 ? PAD_X : 0)
     const badgeAlt =
@@ -564,12 +731,13 @@ export const register: Register = on => {
           alt={
             summary === null
               ? 'No turns yet in this session'
-              : `${summary.isAborted ? 'Stopped after' : 'Last turn'} ${formatDuration(summary.durationMs)}, ${summary.tools} tools, ${summary.files.length} files changed`
+              : `${summary.isAborted ? 'Stopped after' : 'Last turn'} ${formatDuration(summary.durationMs)}, ${summary.tools === 1 ? '1 tool' : `${summary.tools} tools`}, ${summary.files.length === 1 ? '1 file' : `${summary.files.length} files`} changed${summary.tokensIn === undefined ? '' : `, ${formatTokens(summary.tokensIn)} tokens in, ${formatTokens(summary.tokensOut ?? 0)} out`}`
           }
           width={middle}
           height={SUMMARY_H}
         />
         {chipsFor(middle)}
+        {offered.length === 0 ? null : suggestionsFor(middle)}
       </Box>
     )
 
@@ -584,7 +752,7 @@ export const register: Register = on => {
 
     const unfolded = isWorking || b === null ? null : breakdownScene(b, W - PAD_X * 2)
     const unfoldedH = unfolded === null ? 0 : unfolded.height + CARD_BOTTOM
-    const cardH = ROW_H + unfoldedH
+    const cardH = rowH + unfoldedH
 
     // The card is in the flow and sets the band's size; the content lies on
     // an absolute layer over it, which paints above it (an absolute card
@@ -595,10 +763,10 @@ export const register: Register = on => {
         <Box position="absolute" top={0} left={0} width="100%" flexDirection="column">
           <Box flexDirection="row" alignItems="center" gap={0}>
             <Svg
-              source={inset(badgeScene(u?.percent, isWorking), badgeW, ROW_H, PAD_X, (ROW_H - BADGE) / 2)}
+              source={inset(badgeScene(u?.percent, isWorking), badgeW, rowH, PAD_X, (rowH - BADGE) / 2)}
               alt={badgeAlt}
               width={badgeW}
-              height={ROW_H}
+              height={rowH}
             />
             <Box flexDirection="column" flexGrow={1}>
               {body}
@@ -606,10 +774,10 @@ export const register: Register = on => {
             {rings.map((ring, index) => (
               <Svg
                 key={ring.key}
-                source={inset(ring.svg, ringFrameW(index), ROW_H, 0, ringY)}
+                source={inset(ring.svg, ringFrameW(index), rowH, 0, ringY)}
                 alt={ring.alt}
                 width={ringFrameW(index)}
-                height={ROW_H}
+                height={rowH}
               />
             ))}
           </Box>

@@ -12,6 +12,11 @@ A Claude Code mod that puts a **Material 3 Expressive** session band above the p
 - A chip per changed file with its `+/−` lines against `HEAD` (press to copy the path), and a git chip with the branch and how many files are changed (press to copy the branch).
 - A **Context** chip that unfolds the context window by category right in the band: an M3 segmented bar, a legend with tokens and shares, and where auto-compaction runs. Press it again (*Hide context*) to fold it away.
 
+**Suggestions**
+- After a turn, up to three chips offer a next step: *Run the tests* after code changes, *Review the changes*, *Commit these changes* when the repository is dirty, *Continue* after a stopped turn, *Sum up so far* when the context passes 70%.
+- Pressing one only fills the input box, in the language of your last message; you send it yourself.
+- `/ai-suggestions on` has a small model (Haiku) write the chips instead, marked ✦, from your last message, the reply and the files changed. It runs after each turn, adds a little to `/cost`, and stays on across sessions until `/ai-suggestions off`. If the model's answer is unusable, the rule chips stay.
+
 **Always**
 - Rate-limit rings with how long until each window resets. On a plan with no 5-hour limit (such as Ultra), the 5h ring shows ∞.
 - Light and dark follow the app; *reduce motion* is respected. The terminal gets a text version.

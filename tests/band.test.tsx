@@ -1,4 +1,5 @@
 import { expect, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 
 const ROOT = '/repo'
 
@@ -151,6 +152,33 @@ test('a subagent\'s calls and turn are not the main thread\'s', async ($, on) =>
   await ui.unmount()
 })
 
+test('the summary says how many tokens the turn read and wrote', async ($, on) => {
+  on('clock.now', () => ({ value: 0 }))
+  on('process.run', (_, e) => fakeGit(e.argv))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', () => ({ text: '', reason: 'answer' }))
+  const usage = (fresh: number, cached: number, written: number, out: number) => ({
+    input_tokens: fresh,
+    cache_read_input_tokens: cached,
+    cache_creation_input_tokens: written,
+    output_tokens: out,
+    model: 'claude-opus-5-5',
+  })
+
+  await $.prompt.submit({ text: 'do it' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+  await $.turn.complete({ answer: '', durationMs: 60_000, isAborted: false, turnId: 't1', reason: 'answer', usage: usage(2_000, 3_900_000, 98_000, 15_000) } as never)
+  // A prompt-less continuation adds its tokens.
+  await $.turn.complete({ answer: '', durationMs: 10_000, isAborted: false, turnId: 't2', reason: 'answer', usage: usage(1_000, 99_000, 0, 3_000) } as never)
+
+  const ui = await $.ui.mount(band(false))
+  const line = await svgByAlt(ui, /^Last turn/)
+  expect(line?.props.alt).toBe('Last turn 1m 10s, 1 tool, 0 files changed, 4.1M tokens in, 18k out')
+  expect(String(line?.props.source)).toContain('4.1M in · 18k out')
+  await ui.unmount()
+})
+
 test('a turn with no tools says so in words', async ($, on) => {
   on('clock.now', () => ({ value: 0 }))
   on('process.run', (_, e) => fakeGit(e.argv))
@@ -241,5 +269,119 @@ test('the Context chip unfolds the breakdown in the band, and folds it again', a
   await ui.press({ key: 'context' })
   expect(await svgByAlt(ui, unfolded)).toBeUndefined()
   expect((await ui.find({ type: 'Button', key: 'context' }))?.props.label).toBe('Context')
+  await ui.unmount()
+})
+
+// ------------------------------------------------------------ suggestions
+
+const turnWithEdits = async ($: Engine, prompt: string) => {
+  await $.prompt.submit({ text: prompt } as never)
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/hooks/register.tsx` } as never)
+  await $.turn.complete({ answer: 'Done: the band now fills the input box.', durationMs: 30_000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+}
+
+// Lets a reply that was not awaited (the model's) land: a few turns of the
+// microtask queue, as the stubs answer at once.
+const settle = async () => {
+  for (let i = 0; i < 50; i += 1) {
+    await Promise.resolve()
+  }
+}
+
+const USAGE = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+
+test('after a turn, rule chips offer next steps and fill the input box in the prompt\'s language', async ($, on) => {
+  const filled: string[] = []
+  let modelCalls = 0
+  on('clock.now', () => ({ value: 0 }))
+  on('process.run', (_, e) => fakeGit(e.argv))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', () => ({ text: '', reason: 'answer' }))
+  on('model.complete', () => {
+    modelCalls += 1
+
+    return { value: { isAnswered: true, text: '[]', usage: USAGE } }
+  })
+  on('prompt.fill', (_, e) => {
+    filled.push(e.text)
+
+    // An event: its stub returns the result itself, not { value }.
+    return { isFilled: true, text: e.text, cursor: e.text.length }
+  })
+
+  await turnWithEdits($, '把横带改成可以填入建议')
+  await settle()
+
+  const ui = await $.ui.mount(band(false))
+  const chips = (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('suggest:'))
+  expect(chips.map(c => c.props.label)).toEqual(['Run the tests', 'Review the changes', 'Commit these changes'])
+  // The card grows by the suggestion line, which keeps a gap from the chips.
+  expect((await svgByAlt(ui, /^Session band$/))?.props.height).toBe(106)
+  const rows = (await ui.findAll({ type: 'Box' })).filter(box => box.props.marginTop === 'sm')
+  expect(rows.length).toBe(1)
+
+  await ui.press({ key: 'suggest:0' })
+  expect(filled).toEqual(['运行测试，修复失败的部分。'])
+  // Off by default: no model is asked.
+  expect(modelCalls).toBe(0)
+  await ui.unmount()
+})
+
+test('with /ai-suggestions on, a small model writes the chips, marked ✦', async ($, on) => {
+  const asked: string[] = []
+  let stored: unknown
+  on('clock.now', () => ({ value: 0 }))
+  on('process.run', (_, e) => fakeGit(e.argv))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', () => ({ text: '', reason: 'answer' }))
+  on('store.set', (_, e) => {
+    stored = e.value
+
+    return { value: undefined }
+  })
+  on('model.complete', (_, e) => {
+    asked.push(String(e.model))
+
+    return {
+      value: {
+        isAnswered: true,
+        text: 'Here you go: [{"label": "Add a settings toggle", "text": "Add a toggle for the band in settings."}, {"label": "Write the changelog", "text": "Write a changelog entry for this."}]',
+        usage: USAGE,
+      },
+    }
+  })
+
+  const said = await $.command.run({ command: 'ai-suggestions', args: 'on' } as never)
+  expect(stored).toBe(true)
+  expect(String(said.text)).toContain('AI suggestions on')
+
+  await turnWithEdits($, 'make the chips fill the input box')
+  await settle()
+
+  const ui = await $.ui.mount(band(false))
+  const chips = (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('suggest:'))
+  expect(chips.map(c => c.props.label)).toEqual(['✦ Add a settings toggle', '✦ Write the changelog'])
+  expect(asked).toEqual(['haiku'])
+  await ui.unmount()
+})
+
+test('a model reply that is not the JSON asked for leaves the rule chips', async ($, on) => {
+  on('clock.now', () => ({ value: 0 }))
+  on('process.run', (_, e) => fakeGit(e.argv))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', () => ({ text: '', reason: 'answer' }))
+  on('store.set', () => ({ value: undefined }))
+  on('model.complete', () => ({ value: { isAnswered: true, text: 'Sure! You could run the tests.', usage: USAGE } }))
+
+  await $.command.run({ command: 'ai-suggestions', args: 'on' } as never)
+  await turnWithEdits($, 'make the chips fill the input box')
+  await settle()
+
+  const ui = await $.ui.mount(band(false))
+  const chips = (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('suggest:'))
+  expect(chips.map(c => c.props.label)).toEqual(['Run the tests', 'Review the changes', 'Commit these changes'])
   await ui.unmount()
 })
